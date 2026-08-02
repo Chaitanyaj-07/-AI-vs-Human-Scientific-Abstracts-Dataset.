@@ -1,0 +1,477 @@
+
+
+# =============================================================================
+# 1. SETUP AND IMPORTS
+# =============================================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# Text analysis using built-in libraries only
+import re
+from collections import Counter
+from wordcloud import WordCloud  # This IS available on ---
+
+# ML libraries (all pre-installed)
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Set style
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', 100)
+
+print(" Setup complete - All libraries loaded successfully")
+print(f"   --- environment: Python {pd.__version__}, Scikit-learn version available")
+
+# =============================================================================
+# 2. LOAD/DOWNLOAD DATASET WITH MULTIPLE FALLBACKS
+# =============================================================================
+
+import os
+import io
+
+def create_demo_dataset():
+    """Create a realistic demo dataset when real data isn't available"""
+    np.random.seed(42)
+    n_samples = 300
+    
+    # Domains
+    domains = ['Biology', 'Computer Science', 'Medicine', 'Physics', 'Psychology']
+    
+    # Generate base data
+    data = {
+        'abstract_id': [f'ABS_{i:05d}' for i in range(n_samples)],
+        'domain': np.random.choice(domains, n_samples),
+        'author_type': np.random.choice(['Human', 'AI'], n_samples, p=[0.5, 0.5]),
+        'publication_year': np.random.choice([2020, 2021, 2022, 2023, 2024, 2025], n_samples),
+        'readability_score': np.random.normal(14, 2.5, n_samples),
+        'avg_word_length': np.random.normal(5.2, 0.4, n_samples),
+        'sentence_count': np.random.poisson(10, n_samples),
+        'hedging_words_count': np.random.poisson(4, n_samples),
+        'citation_count': np.random.poisson(5, n_samples),
+        'technical_jargon_ratio': np.random.beta(5, 10, n_samples),
+        'subjectivity_score': np.random.beta(3, 8, n_samples),
+        'first_person_pronouns': np.random.poisson(3, n_samples),
+        'passive_voice_ratio': np.random.beta(4, 6, n_samples),
+        'has_statistical_results': np.random.choice([0, 1], n_samples, p=[0.3, 0.7]),
+        'conclusion_statement': np.random.choice([0, 1], n_samples, p=[0.4, 0.6]),
+    }
+    
+    df_demo = pd.DataFrame(data)
+    
+    # Make AI/Human differences realistic
+    ai_mask = df_demo['author_type'] == 'AI'
+    human_mask = ~ai_mask
+    
+    # Humans use more hedging words
+    df_demo.loc[human_mask, 'hedging_words_count'] = np.random.poisson(5, human_mask.sum())
+    df_demo.loc[ai_mask, 'hedging_words_count'] = np.random.poisson(2, ai_mask.sum())
+    
+    # Humans use more first-person pronouns
+    df_demo.loc[human_mask, 'first_person_pronouns'] = np.random.poisson(4, human_mask.sum())
+    df_demo.loc[ai_mask, 'first_person_pronouns'] = np.random.poisson(1, ai_mask.sum())
+    
+    # AI tends to have more consistent readability
+    df_demo.loc[human_mask, 'readability_score'] = np.random.normal(14, 3, human_mask.sum())
+    df_demo.loc[ai_mask, 'readability_score'] = np.random.normal(13.5, 1.5, ai_mask.sum())
+    
+    # Add target variable
+    df_demo['human_written'] = (df_demo['author_type'] == 'Human').astype(int)
+    
+    # Generate sample abstracts for word clouds
+    human_abstracts = [
+        "In this study, we investigated the effects of CRISPR-Cas9 gene editing on human embryos. Our results suggest that off-target effects may be less common than previously thought. We observed significant improvements in editing efficiency when using modified guide RNAs. These findings could have important implications for therapeutic applications.",
+        "We conducted a longitudinal study of 500 adolescents to examine social media's impact on mental health. Our analysis revealed that passive consumption correlated with increased anxiety scores. Interestingly, we found that active creation had protective effects. These results indicate the need for nuanced digital wellness guidelines.",
+        "Here we present a randomized controlled trial of a novel antihypertensive combination therapy. Our data show significant blood pressure reduction compared to monotherapy. We observed minimal adverse events across both groups. These findings support combination therapy as first-line treatment."
+    ]
+    
+    ai_abstracts = [
+        "This paper introduces a novel transformer architecture optimized for low-resource languages. The proposed model reduces computational complexity while maintaining performance. Experiments on four African languages demonstrate 42% faster inference. The results indicate that efficient attention mechanisms can democratize NLP.",
+        "Quantum entanglement is demonstrated in a 5x5 superconducting qubit array. Two-qubit gate fidelities of 99.2% are achieved at millikelvin temperatures. Decoherence times represent significant improvement over previous architectures. This work marks progress toward fault-tolerant quantum computing.",
+        "A deep learning approach for protein structure prediction is presented. The model achieves state-of-the-art accuracy on benchmark datasets. Attention mechanisms capture long-range dependencies in amino acid sequences. This method could accelerate drug discovery and protein engineering."
+    ]
+    
+    # Assign abstracts based on author type
+    df_demo.loc[human_mask, 'abstract_text'] = np.random.choice(human_abstracts, human_mask.sum())
+    df_demo.loc[ai_mask, 'abstract_text'] = np.random.choice(ai_abstracts, ai_mask.sum())
+    
+    return df_demo
+
+# Try to load real data from ---
+df = None
+possible_paths = [
+    '/---/input/ai-vs-human-scientific-abstracts/ai_vs_human_abstracts.csv',
+    '/---/input/ai-vs-human-abstracts/train.csv',
+    '/---/input/ai-vs-human-scientific-abstracts-dataset/ai_vs_human_abstracts.csv',
+    '../input/ai-vs-human-scientific-abstracts/ai_vs_human_abstracts.csv'
+]
+
+for path in possible_paths:
+    if os.path.exists(path):
+        try:
+            df = pd.read_csv(path)
+            print(f"Dataset loaded from: {path}")
+            print(f"   Shape: {df.shape}")
+            break
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            continue
+
+# If no real data, use demo dataset
+if df is None:
+    print(" Using demo dataset (no external data found)")
+    df = create_demo_dataset()
+    print(f" Demo dataset created with {len(df)} samples")
+    print(f"   Columns: {df.columns.tolist()}")
+
+# =============================================================================
+# 3. DATA PREPROCESSING AND CLEANING
+# =============================================================================
+
+print("\n" + "="*60)
+print(" DATA PREPROCESSING")
+print("="*60)
+
+# Handle missing values
+missing_before = df.isnull().sum().sum()
+if missing_before > 0:
+    print(f" Found {missing_before} missing values")
+    # Fill numeric missing with median
+    for col in df.select_dtypes(include=[np.number]).columns:
+        df[col].fillna(df[col].median(), inplace=True)
+    # Fill categorical missing with mode
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown', inplace=True)
+    print(f"Missing values handled")
+else:
+    print(" No missing values found")
+
+# Ensure target variable exists
+if 'human_written' not in df.columns and 'author_type' in df.columns:
+    df['human_written'] = (df['author_type'] == 'Human').astype(int)
+    print(" Created target variable 'human_written' from 'author_type'")
+
+# =============================================================================
+# 4. EXPLORATORY DATA ANALYSIS 
+# =============================================================================
+
+print("\n" + "="*60)
+print("EXPLORATORY DATA ANALYSIS")
+print("="*60)
+
+# Create a 2x2 dashboard
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+# Plot 1: Author distribution
+if 'author_type' in df.columns:
+    author_counts = df['author_type'].value_counts()
+    colors = ['#2E86AB', '#A23B72'] if len(author_counts) > 1 else ['#2E86AB']
+    wedges, texts, autotexts = axes[0,0].pie(author_counts.values, 
+                                              labels=author_counts.index,
+                                              autopct='%1.1f%%',
+                                              colors=colors,
+                                              explode=[0.05 if i==0 else 0 for i in range(len(author_counts))])
+    axes[0,0].set_title('Author Type Distribution', fontsize=12, fontweight='bold')
+
+# Plot 2: Domain distribution
+if 'domain' in df.columns:
+    domain_counts = df['domain'].value_counts().head(6)
+    domain_counts.plot(kind='bar', ax=axes[0,1], color='#F18F01', edgecolor='black')
+    axes[0,1].set_title('Top Domains', fontsize=12, fontweight='bold')
+    axes[0,1].set_xlabel('')
+    axes[0,1].tick_params(axis='x', rotation=45)
+
+# Plot 3: Readability comparison
+readability_col = None
+for col in ['readability_score', 'readability', 'flesch_score']:
+    if col in df.columns:
+        readability_col = col
+        break
+
+if readability_col and 'author_type' in df.columns:
+    df.boxplot(column=readability_col, by='author_type', ax=axes[1,0])
+    axes[1,0].set_title('Readability Score by Author', fontsize=12, fontweight='bold')
+    axes[1,0].set_xlabel('')
+    axes[1,0].set_ylabel('Score')
+
+# Plot 4: Publication year distribution
+if 'publication_year' in df.columns:
+    df['publication_year'].value_counts().sort_index().plot(kind='bar', ax=axes[1,1], 
+                                                              color='#4ECDC4', edgecolor='black')
+    axes[1,1].set_title('Publications by Year', fontsize=12, fontweight='bold')
+    axes[1,1].set_xlabel('Year')
+    axes[1,1].tick_params(axis='x', rotation=45)
+
+plt.suptitle('AI vs Human Scientific Abstracts - Overview Dashboard', fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# 5. STATISTICAL COMPARISON
+# =============================================================================
+
+print("\n" + "="*60)
+print("STATISTICAL COMPARISON: HUMAN VS AI")
+print("="*60)
+
+# Select numeric columns for comparison
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+# Remove ID columns and target
+numeric_cols = [col for col in numeric_cols if 'id' not in col.lower() 
+                and col not in ['human_written', 'Unnamed: 0']]
+
+if 'author_type' in df.columns and len(numeric_cols) > 0:
+    comparison_data = []
+    for col in numeric_cols[:8]:  # Limit to first 8 for readability
+        human_mean = df[df['author_type']=='Human'][col].mean()
+        ai_mean = df[df['author_type']=='AI'][col].mean()
+        
+        if ai_mean != 0:
+            diff_pct = ((human_mean - ai_mean) / ai_mean) * 100
+        else:
+            diff_pct = np.nan
+            
+        comparison_data.append({
+            'Feature': col.replace('_', ' ').title(),
+            'Human Mean': round(human_mean, 2),
+            'AI Mean': round(ai_mean, 2),
+            'Difference %': round(diff_pct, 1) if not np.isnan(diff_pct) else 'N/A'
+        })
+    
+    comparison_df = pd.DataFrame(comparison_data)
+    print("\n Key Feature Comparison:")
+    display(comparison_df)
+
+# =============================================================================
+# 6. CORRELATION ANALYSIS
+# =============================================================================
+
+print("\n" + "="*60)
+print(" CORRELATION ANALYSIS")
+print("="*60)
+
+if len(numeric_cols) >= 3:
+    plt.figure(figsize=(10, 8))
+    corr = df[numeric_cols].corr()
+    mask = np.triu(np.ones_like(corr, dtype=bool))
+    sns.heatmap(corr, mask=mask, annot=True, fmt='.2f', cmap='RdBu_r', 
+                center=0, square=True, linewidths=1, cbar_kws={"shrink": 0.8})
+    plt.title('Feature Correlation Matrix', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+
+# =============================================================================
+# 7. WORD CLOUDS
+# =============================================================================
+
+print("\n" + "="*60)
+print("TEXT ANALYSIS - WORD CLOUDS")
+print("="*60)
+
+if 'abstract_text' in df.columns and 'author_type' in df.columns:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    for ax, author, color in zip([ax1, ax2], ['Human', 'AI'], ['Blues', 'Purples']):
+        texts = df[df['author_type']==author]['abstract_text'].dropna().astype(str).tolist()
+        if texts:
+            # Combine all texts
+            combined_text = ' '.join(texts)
+            # Clean text
+            combined_text = re.sub(r'[^\w\s]', '', combined_text.lower())
+            
+            if combined_text.strip():
+                wordcloud = WordCloud(width=400, height=200,
+                                     background_color='white',
+                                     colormap=color,
+                                     max_words=50,
+                                     random_state=42).generate(combined_text)
+                ax.imshow(wordcloud, interpolation='bilinear')
+                ax.axis('off')
+                ax.set_title(f'{author} Abstracts', fontsize=12, fontweight='bold')
+    
+    plt.suptitle('Word Cloud Comparison', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+else:
+    print(" 'abstract_text' column not found - skipping word clouds")
+
+# =============================================================================
+# 8. BASELINE ML MODEL
+# =============================================================================
+
+print("\n" + "="*60)
+print(" BASELINE MACHINE LEARNING MODEL")
+print("="*60)
+
+# Prepare features for ML
+feature_cols = [col for col in numeric_cols if col != 'human_written']
+feature_cols = feature_cols[:10]  # Limit to top 10 features
+
+if len(feature_cols) >= 3 and 'human_written' in df.columns:
+    # Prepare data
+    X = df[feature_cols].copy()
+    y = df['human_written'].copy()
+    
+    # Handle any infinite values
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(X.median())
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42, stratify=y
+    )
+    
+    print(f" Data prepared: {X_train.shape[0]} training samples, {X_test.shape[0]} test samples")
+    
+    # Train models
+    models = {
+        'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+        'Random Forest': RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+    }
+    
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)[:, 1]
+        
+        accuracy = (y_pred == y_test).mean()
+        auc = roc_auc_score(y_test, y_proba)
+        results[name] = {'accuracy': accuracy, 'auc': auc, 'model': model}
+        
+        print(f"\n{name}:")
+        print(f"  Accuracy: {accuracy:.3f}")
+        print(f"  AUC-ROC: {auc:.3f}")
+    
+    # Feature importance from Random Forest
+    if 'Random Forest' in results:
+        rf = results['Random Forest']['model']
+        importance = pd.DataFrame({
+            'feature': feature_cols,
+            'importance': rf.feature_importances_
+        }).sort_values('importance', ascending=False)
+        
+        print("\n Top 5 Important Features:")
+        display(importance.head(5))
+        
+        # Plot feature importance
+        plt.figure(figsize=(10, 5))
+        plt.barh(importance['feature'][:8], importance['importance'][:8], color='#4ECDC4')
+        plt.xlabel('Importance')
+        plt.title('Feature Importance - Random Forest')
+        plt.gca().invert_yaxis()
+        plt.tight_layout()
+        plt.show()
+    
+    # Confusion matrix for best model
+    best_model = max(results, key=lambda x: results[x]['auc'])
+    best_pred = models[best_model].predict(X_test)
+    
+    plt.figure(figsize=(6, 5))
+    cm = confusion_matrix(y_test, best_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['AI', 'Human'],
+                yticklabels=['AI', 'Human'])
+    plt.title(f'Confusion Matrix - {best_model}')
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.tight_layout()
+    plt.show()
+
+# =============================================================================
+# 9. INTERACTIVE VISUALIZATION 
+# =============================================================================
+
+print("\n" + "="*60)
+print("INTERACTIVE VISUALIZATION")
+print("="*60)
+
+if len(df) <= 500 and 'author_type' in df.columns:
+    # Find suitable columns for plotting
+    x_col = 'readability_score' if 'readability_score' in df.columns else numeric_cols[0] if numeric_cols else None
+    y_col = 'sentence_count' if 'sentence_count' in df.columns else numeric_cols[1] if len(numeric_cols) > 1 else None
+    size_col = 'citation_count' if 'citation_count' in df.columns else None
+    
+    if x_col and y_col:
+        fig = px.scatter(df, x=x_col, y=y_col,
+                        color='author_type',
+                        size=size_col if size_col else None,
+                        hover_data=['domain'] if 'domain' in df.columns else None,
+                        title=f'Interactive: {x_col} vs {y_col}',
+                        color_discrete_map={'Human': '#2E86AB', 'AI': '#A23B72'})
+        fig.show()
+    else:
+        print(" Insufficient numeric columns for interactive plot")
+else:
+    print(" Skipping interactive plot (dataset >500 rows or missing columns)")
+
+# =============================================================================
+# 10. KEY INSIGHTS SUMMARY
+# =============================================================================
+
+print("\n" + "="*60)
+print( " KEY INSIGHTS SUMMARY")
+print("="*60)
+
+insights = []
+
+# Class balance
+if 'author_type' in df.columns:
+    human_pct = (df['author_type'] == 'Human').mean() * 100
+    ai_pct = (df['author_type'] == 'AI').mean() * 100
+    insights.append(f"• Dataset composition: {human_pct:.1f}% Human, {ai_pct:.1f}% AI")
+
+# Domain distribution
+if 'domain' in df.columns:
+    top_domain = df['domain'].value_counts().index[0]
+    insights.append(f"• Most common domain: {top_domain}")
+
+# Key differences
+key_features = []
+for col in ['hedging_words_count', 'first_person_pronouns', 'passive_voice_ratio']:
+    if col in df.columns and 'author_type' in df.columns:
+        h_mean = df[df['author_type']=='Human'][col].mean()
+        a_mean = df[df['author_type']=='AI'][col].mean()
+        if a_mean != 0:
+            diff = ((h_mean - a_mean) / a_mean) * 100
+            if abs(diff) > 10:
+                col_name = col.replace('_', ' ').title()
+                key_features.append(f"• Humans use {abs(diff):.0f}% {'more' if diff>0 else 'less'} {col_name}")
+
+insights.extend(key_features[:3])  # Add top 3 differences
+
+#Model performance
+if 'results' in locals() and results:
+    best_model = max(results, key=lambda x: results[x]['auc'])
+    insights.append(f"• Best model: {best_model} (AUC: {results[best_model]['auc']:.3f})")
+
+# Print insights
+for insight in insights:
+    print(insight)
+
+if not insights:
+    print("  explore the visualizations above for insights")
+
+print("\n" + "="*60)
+print(" ANALYSIS COMPLETE - NOTEBOOK READY FOR ---")
+print("="*60)
+print("\n Next Steps:")
+print("   1. Replace demo data with actual dataset when available")
+print("   2. Tune hyperparameters for better model performance")
+print("   3. Try deep learning models (BERT, SciBERT) for text classification")
